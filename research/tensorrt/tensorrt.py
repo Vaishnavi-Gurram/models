@@ -155,6 +155,7 @@ def get_serving_meta_graph_def(savedmodel_dir):
 
 
 def write_graph_to_file(graph_name, graph_def, output_dir):
+  """Write Frozen Graph file to disk."""
   output_path = os.path.join(output_dir, graph_name)
   with tf.gfile.GFile(output_path, "wb") as f:
     f.write(graph_def.SerializeToString())
@@ -216,6 +217,22 @@ def get_tftrt_name(graph_name, precision_string):
 
 def get_trt_graph(graph_name, graph_def, precision_mode, output_dir,
                   output_nodes, batch_size=128, workspace_size=1<<30):
+  """Create and save inference graph using the TensorRT library.
+
+  Args:
+    graph_name: string, name of the graph to be used for saving.
+    graph_def: GraphDef, the Frozen Graph to be converted.
+    precision_mode: string, the precision that TensorRT should convert into.
+      Options- FP32, FP16, INT8.
+    output_dir: string, the path to where files should be written.
+    output_nodes: list of strings, the names of the output nodes that will
+      be returned during inference.
+    batch_size: int, the number of examples that will be predicted at a time.
+    workspace_size: long, size in bytes that can be used during conversion.
+
+  Returns:
+    GraphDef for the TensorRT inference graph.
+  """
   trt_graph = trt.create_inference_graph(
       graph_def, output_nodes, max_batch_size=batch_size,
       max_workspace_size_bytes=workspace_size,
@@ -227,10 +244,9 @@ def get_trt_graph(graph_name, graph_def, precision_mode, output_dir,
 
 
 def get_trt_graph_from_calib(graph_name, calib_graph_def, output_dir):
+  """Convert a TensorRT graph used for calibration to an inference graph."""
   trt_graph = trt.calib_graph_to_infer_graph(calib_graph_def)
-
   write_graph_to_file(graph_name, trt_graph, output_dir)
-
   return trt_graph
 
 
@@ -238,6 +254,7 @@ def get_trt_graph_from_calib(graph_name, calib_graph_def, output_dir):
 # Run the graph in various precision modes.
 ################################################################################
 def get_gpu_config():
+  """Share GPU memory between image preprocessing and inference."""
   gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=_GPU_MEM_FRACTION)
   return tf.ConfigProto(gpu_options=gpu_options)
 
@@ -249,6 +266,26 @@ def get_iterator(data):
 
 
 def time_graph(graph_def, data, input_node, output_nodes, num_loops=100):
+  """Run and time the inference graph.
+
+  This function sets up the input and outputs for inference, warms up by
+  running inference for _WARMUP_NUM_LOOPS, then times inference for num_loops
+  loops.
+
+  Args:
+    graph_def: GraphDef, the graph to be timed.
+    data: ndarray of shape [batch_size, height, width, depth], data to be
+      predicted.
+    input_node: string, the label of the input node where data will enter the
+      graph.
+    output_nodes: list of strings, the names of the output nodes that will
+      be returned during inference.
+    num_loops: int, number of batches that should run through for timing.
+
+  Returns:
+    A tuple consisting of a list of num_loops inference times, and the
+    predictions that were output for the batch.
+  """
   tf.logging.info("Starting execution")
 
   tf.reset_default_graph()
@@ -283,6 +320,19 @@ def time_graph(graph_def, data, input_node, output_nodes, num_loops=100):
 
 
 def log_stats(graph_name, log_buffer, timings, batch_size):
+  """Write stats to the passed log_buffer.
+
+  Args:
+    graph_name: string, name of the graph to be used for reporting.
+    log_buffer: filehandle, log file opened for appending.
+    timings: list of floats, times produced for multiple runs that will be
+      used for statistic calculation
+    batch_size: int, number of examples per batch
+
+  Returns:
+    list of two floats representing frames per second and 99th percentile
+      time per batch
+  """
   times = np.array(timings)
   steps = len(times)
   speeds = batch_size / times
@@ -319,6 +369,7 @@ def time_and_log_graph(graph_name, graph_def, data, log_buffer, flags):
 
 def run_trt_graph_for_mode(
     graph_name, graph_def, mode, data, log_buffer, flags):
+  """Convert, time, and log the graph at `mode` precision using TensorRT."""
   g_name = get_tftrt_name(graph_name, mode)
   graph = get_trt_graph(
       g_name, graph_def, mode, flags.output_dir, flags.output_nodes,
@@ -348,7 +399,18 @@ def top_predictions(result, n):
 
 
 def get_labels_for_ids(labels, ids, ids_are_one_indexed=False):
-  """Get the human-readable labels for given ids."""
+  """Get the human-readable labels for given ids.
+
+  Args:
+    labels: dict, string-ID to label mapping from ImageNet.
+    ids: list of ints, IDs to return labels for.
+    ids_are_one_indexed: whether to increment passed IDs by 1 to account for
+      the background category. See ArgParser `--ids_are_one_indexed`
+      for details.
+
+  Returns:
+    list of category labels
+  """
   return [labels[str(x + int(ids_are_one_indexed))] for x in ids]
 
 
@@ -357,7 +419,6 @@ def print_predictions(results, ids_are_one_indexed=False, preds_to_print=5):
   labels = get_labels()
 
   print("Predictions:")
-
   for mode, result in results:
     pred_ids = top_predictions(result, preds_to_print)
     pred_labels = get_labels_for_ids(labels, pred_ids, ids_are_one_indexed)
@@ -533,7 +594,7 @@ class TensorRTParser(argparse.ArgumentParser):
 
     self.add_argument(
         "--workspace_size", "-ws", type=long, default=2<<30,
-        help="[default: %(default)s] Workspace size in MB.",
+        help="[default: %(default)s] Workspace size in bytes.",
         metavar="<WS>"
     )
 
